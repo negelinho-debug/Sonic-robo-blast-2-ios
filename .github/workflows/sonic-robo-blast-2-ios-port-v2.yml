@@ -1,4 +1,4 @@
-name: SRB2 iOS - v2 ANDROID APK ASSETS
+name: Sonic Robo Blast 2 iOS Port v3
 
 on:
   workflow_dispatch:
@@ -8,11 +8,12 @@ permissions:
 
 jobs:
   build-ios:
+    name: Build Sonic Robo Blast 2 iOS IPA v3
     runs-on: macos-latest
     timeout-minutes: 45
 
     steps:
-      - name: Checkout SRB2 2.2.13 source
+      - name: Get Sonic Robo Blast 2 source
         shell: bash
         run: |
           set -euo pipefail
@@ -21,99 +22,49 @@ jobs:
           mkdir -p output
           (cd SRB2 && git rev-parse HEAD) | tee output/source.txt
 
-      - name: Download exact SRB2 Android v2.2.13 patch1 APK
+      - name: Get Android port files and icon
         shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
 
           mkdir -p output apk-src
 
-          python3 <<'PY'
-          import json
-          import urllib.request
-          from pathlib import Path
+          # v2 used the GitHub Releases API and hit HTTP 403 rate limiting.
+          # v3 skips the API completely and downloads the exact release asset
+          # directly by its stable GitHub release URL.
+          APK_URL="https://github.com/SRB2-Mobile/SRB2-Android/releases/download/android-port-build-v2213-patch1/srb2-android-v2213-gameFull-release-patch1.apk"
 
-          api = (
-              "https://api.github.com/repos/"
-              "SRB2-Mobile/SRB2-Android/releases/tags/"
-              "android-port-build-v2213-patch1"
-          )
+          echo "$APK_URL" | tee output/apk-url.txt
 
-          req = urllib.request.Request(
-              api,
-              headers={
-                  "Accept": "application/vnd.github+json",
-                  "User-Agent": "SRB2-iOS-GitHub-Actions"
-              }
-          )
-
-          with urllib.request.urlopen(req, timeout=60) as r:
-              release = json.load(r)
-
-          assets = release.get("assets", [])
-          candidates = [
-              a for a in assets
-              if a.get("name", "").lower().endswith(".apk")
-              and "gamefull" in a.get("name", "").lower()
-          ]
-
-          if not candidates:
-              candidates = [
-                  a for a in assets
-                  if a.get("name", "").lower().endswith(".apk")
-              ]
-
-          if not candidates:
-              raise SystemExit("No APK asset found in android-port-build-v2213-patch1")
-
-          asset = candidates[0]
-
-          Path("output/android-release.json").write_text(
-              json.dumps(
-                  {
-                      "tag": release.get("tag_name"),
-                      "name": release.get("name"),
-                      "asset": asset.get("name"),
-                      "url": asset.get("browser_download_url"),
-                  },
-                  indent=2
-              )
-          )
-
-          Path("output/apk-url.txt").write_text(
-              asset["browser_download_url"] + "\n"
-          )
-
-          print("APK_ASSET=", asset["name"])
-          print("APK_URL=", asset["browser_download_url"])
-          PY
-
-          APK_URL="$(cat output/apk-url.txt)"
-
-          curl -L --fail --retry 4 \
+          curl -L --fail --retry 5 --retry-delay 3 \
             "$APK_URL" \
             -o SRB2-Android-v2213-patch1.apk
+
+          echo "===== APK ====="
+          ls -lh SRB2-Android-v2213-patch1.apk
+          shasum -a 256 SRB2-Android-v2213-patch1.apk \
+            | tee output/apk-sha256.txt
 
           unzip -oq SRB2-Android-v2213-patch1.apk -d apk-src
 
           echo "===== APK ASSETS ====="
-          find apk-src/assets -maxdepth 3 -type f -print | sort | tee output/apk-assets.txt
+          find apk-src/assets -maxdepth 3 -type f -print \
+            | sort \
+            | tee output/apk-assets.txt
 
-          # Verify this is the same family as the APK supplied by the user.
           test -f apk-src/lib/arm64-v8a/libmain.so
+
           strings apk-src/lib/arm64-v8a/libmain.so \
             | grep -m1 "Sonic Robo Blast 2 v2.2.13" \
             | tee output/apk-version.txt
 
-          # Exact launcher icon found in the supplied APK.
+          # Exact launcher icon from the supplied Android build.
           if [ -f apk-src/res/C9.png ]; then
             cp apk-src/res/C9.png output/SRB2-Android-Icon.png
           elif [ -f apk-src/res/CG.png ]; then
             cp apk-src/res/CG.png output/SRB2-Android-Icon.png
           else
-            echo "ERROR: 192x192 Android launcher icon not found"
+            echo "ERROR: Android launcher icon not found"
             exit 1
           fi
 
@@ -135,7 +86,7 @@ jobs:
             fi
           done | tee output/game-data.txt
 
-      - name: Install build tools
+      - name: Prepare iOS build tools
         shell: bash
         run: |
           set -euo pipefail
@@ -143,7 +94,7 @@ jobs:
           xcodebuild -version
           xcrun --sdk iphoneos --show-sdk-path
 
-      - name: Bootstrap vcpkg for iPhone arm64
+      - name: Prepare SDL2 libraries for iPhone arm64
         shell: bash
         run: |
           set -euo pipefail
@@ -261,7 +212,7 @@ jobs:
           ''')
           PY
 
-      - name: Configure SRB2 for arm64 iPhone
+      - name: Configure iPhone arm64 build
         id: configure
         continue-on-error: true
         shell: bash
@@ -286,7 +237,7 @@ jobs:
             -DCMAKE_BUILD_TYPE=Release \
             2>&1 | tee output/cmake-configure.log
 
-      - name: Build SRB2 arm64 iPhone app
+      - name: Build Sonic Robo Blast 2 for iPhone
         id: build
         if: steps.configure.outcome == 'success'
         continue-on-error: true
@@ -388,7 +339,7 @@ jobs:
 
           find "$APP" -maxdepth 1 -type f -print | sort | tee output/app-files.txt
 
-      - name: Package unsigned IPA
+      - name: Create unsigned IPA
         id: ipa
         if: steps.app.outcome == 'success'
         continue-on-error: true
@@ -398,17 +349,17 @@ jobs:
           rm -rf Payload
           mkdir Payload
           cp -a stage/SRB2.app Payload/
-          zip -qry SRB2-iOS-v2-ANDROID-ASSETS-UNSIGNED.ipa Payload
-          ls -lh SRB2-iOS-v2-ANDROID-ASSETS-UNSIGNED.ipa
+          zip -qry Sonic-Robo-Blast-2-iOS-v3-UNSIGNED.ipa Payload
+          ls -lh Sonic-Robo-Blast-2-iOS-v3-UNSIGNED.ipa
 
-      - name: Collect diagnostics
+      - name: Save build logs
         if: always()
         shell: bash
         run: |
           set +e
           mkdir -p output
           {
-            echo "SRB2 iOS v2"
+            echo "SRB2 iOS v3"
             echo "CONFIGURE=${{ steps.configure.outcome }}"
             echo "BUILD=${{ steps.build.outcome }}"
             echo "APP=${{ steps.app.outcome }}"
@@ -420,34 +371,34 @@ jobs:
           tail -500 output/cmake-configure.log > output/cmake-configure-tail.txt 2>/dev/null || true
           tail -500 output/xcodebuild.log > output/xcodebuild-tail.txt 2>/dev/null || true
 
-      - name: Upload IPA
+      - name: Upload Sonic Robo Blast 2 IPA
         if: steps.ipa.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
-          name: SRB2-iOS-v2-ANDROID-ASSETS-UNSIGNED
-          path: SRB2-iOS-v2-ANDROID-ASSETS-UNSIGNED.ipa
+          name: Sonic-Robo-Blast-2-iOS-v3-UNSIGNED
+          path: Sonic-Robo-Blast-2-iOS-v3-UNSIGNED.ipa
           if-no-files-found: error
           retention-days: 7
           compression-level: 0
 
-      - name: Upload diagnostics
+      - name: Upload build logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: SRB2-iOS-v2-Diagnostics
+          name: Sonic-Robo-Blast-2-iOS-v3-Logs
           path: output
           if-no-files-found: ignore
           retention-days: 7
           compression-level: 0
 
-      - name: Final status
+      - name: Build result
         if: always()
         shell: bash
         run: |
           if [ "${{ steps.ipa.outcome }}" = "success" ]; then
-            echo "SUCCESS: SRB2 unsigned IPA created."
+            echo "SUCCESS: Sonic Robo Blast 2 iOS v3 IPA created."
           else
-            echo "SRB2 v2 did not reach IPA yet."
-            echo "Download SRB2-iOS-v2-Diagnostics and send it to ChatGPT."
+            echo "Sonic Robo Blast 2 iOS v3 did not reach IPA yet."
+            echo "Download Sonic-Robo-Blast-2-iOS-v3-Logs and send it to ChatGPT."
             exit 1
           fi
