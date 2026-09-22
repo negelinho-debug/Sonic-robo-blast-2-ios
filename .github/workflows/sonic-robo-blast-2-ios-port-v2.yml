@@ -1,4 +1,4 @@
-name: Sonic Robo Blast 2 iOS Port v4
+name: Sonic Robo Blast 2 iOS Port v5
 
 on:
   workflow_dispatch:
@@ -8,7 +8,7 @@ permissions:
 
 jobs:
   build-ios:
-    name: Build Sonic Robo Blast 2 iOS IPA v4
+    name: Build Sonic Robo Blast 2 iOS IPA v5
     runs-on: macos-latest
     timeout-minutes: 45
 
@@ -126,25 +126,112 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
+          cat > SRB2/src/sdl/ios_bootstrap.c <<'C'
+          #include <mach-o/dyld.h>
+          #include <limits.h>
+          #include <stdio.h>
+          #include <stdlib.h>
+          #include <string.h>
+          #include <sys/stat.h>
+          #include <unistd.h>
+
+          static void mkdir_if_needed(const char *path)
+          {
+              if (path && path[0])
+                  mkdir(path, 0755);
+          }
+
+          __attribute__((constructor))
+          static void SRB2_iOS_Bootstrap(void)
+          {
+              const char *home = getenv("HOME");
+
+              if (home)
+              {
+                  char documents[PATH_MAX];
+                  char addons[PATH_MAX];
+                  char logfile[PATH_MAX];
+
+                  snprintf(documents, sizeof(documents), "%s/Documents", home);
+                  snprintf(addons, sizeof(addons), "%s/Documents/Addons", home);
+                  snprintf(logfile, sizeof(logfile), "%s/Documents/SRB2-runtime.log", home);
+
+                  mkdir_if_needed(documents);
+                  mkdir_if_needed(addons);
+
+                  freopen(logfile, "a", stdout);
+                  freopen(logfile, "a", stderr);
+                  setvbuf(stdout, NULL, _IONBF, 0);
+                  setvbuf(stderr, NULL, _IONBF, 0);
+
+                  fprintf(stderr, "\n=== SRB2 iOS launch ===\n");
+              }
+
+              char executable[PATH_MAX];
+              uint32_t size = (uint32_t)sizeof(executable);
+
+              if (_NSGetExecutablePath(executable, &size) == 0)
+              {
+                  executable[sizeof(executable) - 1] = '\0';
+
+                  char *slash = strrchr(executable, '/');
+                  if (slash)
+                  {
+                      *slash = '\0';
+                      chdir(executable);
+                      fprintf(stderr, "bundle_cwd=%s\n", executable);
+                  }
+              }
+
+              setenv("SDL_TOUCH_MOUSE_EVENTS", "1", 1);
+          }
+          C
+
           python3 <<'PY'
           from pathlib import Path
+          import re
 
-          root = Path("SRB2")
-          top = root / "CMakeLists.txt"
-          s = top.read_text()
-          s = s.replace("find_package(CURL REQUIRED)", "find_package(CURL QUIET)")
-          top.write_text(s)
+          top = Path("SRB2/CMakeLists.txt")
+          s = top.read_text(encoding="utf-8")
 
-          cm = root / "src" / "sdl" / "CMakeLists.txt"
-          s = cm.read_text()
-          anchor = "find_package(SDL2 REQUIRED)\n"
-          ios = r'''
-          if("${CMAKE_SYSTEM_NAME}" STREQUAL "iOS")
+          # v4 expected a literal SDL2 find_package line inside
+          # src/sdl/CMakeLists.txt. SRB2 2.2.13 does not have that exact
+          # layout, so v5 no longer patches src/sdl/CMakeLists.txt at all.
+
+          s = re.sub(
+              r'find_package\s*\(\s*CURL\s+REQUIRED\s*\)',
+              'find_package(CURL QUIET)',
+              s,
+              count=1,
+              flags=re.IGNORECASE
+          )
+
+          ios_patch = r"""
+
+          # ===== SRB2 iOS PORT v5 =====
+          if(APPLE AND "${CMAKE_SYSTEM_NAME}" STREQUAL "iOS")
+              message(STATUS "Applying SRB2 iOS v5 target patch")
+
+              if(NOT TARGET SRB2SDL2)
+                  message(FATAL_ERROR "SRB2SDL2 target was not created by upstream CMake")
+              endif()
+
+              target_sources(SRB2SDL2 PRIVATE
+                  "${CMAKE_SOURCE_DIR}/src/sdl/ios_bootstrap.c"
+              )
+
+              target_compile_definitions(SRB2SDL2 PRIVATE
+                  NOEXECINFO
+                  SRB2_IOS_PORT
+              )
+
               if(TARGET SDL2::SDL2main)
                   target_link_libraries(SRB2SDL2 PRIVATE SDL2::SDL2main)
               elseif(TARGET SDL2main)
                   target_link_libraries(SRB2SDL2 PRIVATE SDL2main)
               endif()
+
               target_link_libraries(SRB2SDL2 PRIVATE
                   "-framework UIKit"
                   "-framework Foundation"
@@ -158,76 +245,27 @@ jobs:
                   "-framework QuartzCore"
               )
           endif()
-          '''
-          if anchor not in s:
-              raise SystemExit("SDL2 find_package anchor not found")
-          if ios not in s:
-              s = s.replace(anchor, anchor + ios, 1)
+          # ===== END SRB2 iOS PORT v5 =====
+          """
 
-          pre = r'''
-          if("${CMAKE_SYSTEM_NAME}" STREQUAL "iOS")
-              target_sources(SRB2SDL2 PRIVATE ios_bootstrap.c)
-              target_compile_definitions(SRB2SDL2 PRIVATE -DNOEXECINFO -DSRB2_IOS_PORT)
-          endif()
+          if "SRB2 iOS PORT v5" not in s:
+              s = s.rstrip() + "\n" + ios_patch + "\n"
 
-          '''
-          if pre not in s:
-              s = pre + s
-          cm.write_text(s)
+          top.write_text(s, encoding="utf-8")
 
-          (root / "src" / "sdl" / "ios_bootstrap.c").write_text(r'''
-          #include <mach-o/dyld.h>
-          #include <limits.h>
-          #include <stdio.h>
-          #include <stdlib.h>
-          #include <string.h>
-          #include <sys/stat.h>
-          #include <unistd.h>
+          Path("output/cmake-ios-patch.txt").write_text(
+              ios_patch,
+              encoding="utf-8"
+          )
 
-          static void mkdir_if_needed(const char *path)
-          {
-              if (path && path[0]) mkdir(path, 0755);
-          }
-
-          __attribute__((constructor))
-          static void SRB2_iOS_Bootstrap(void)
-          {
-              const char *home = getenv("HOME");
-              if (home)
-              {
-                  char documents[PATH_MAX];
-                  char addons[PATH_MAX];
-                  char logfile[PATH_MAX];
-                  snprintf(documents, sizeof(documents), "%s/Documents", home);
-                  snprintf(addons, sizeof(addons), "%s/Documents/Addons", home);
-                  snprintf(logfile, sizeof(logfile), "%s/Documents/SRB2-runtime.log", home);
-                  mkdir_if_needed(documents);
-                  mkdir_if_needed(addons);
-                  freopen(logfile, "a", stdout);
-                  freopen(logfile, "a", stderr);
-                  setvbuf(stdout, NULL, _IONBF, 0);
-                  setvbuf(stderr, NULL, _IONBF, 0);
-                  fprintf(stderr, "\\n=== SRB2 iOS launch ===\\n");
-              }
-
-              char executable[PATH_MAX];
-              uint32_t size = (uint32_t)sizeof(executable);
-              if (_NSGetExecutablePath(executable, &size) == 0)
-              {
-                  executable[sizeof(executable)-1] = '\\0';
-                  char *slash = strrchr(executable, '/');
-                  if (slash)
-                  {
-                      *slash = '\\0';
-                      chdir(executable);
-                      fprintf(stderr, "bundle_cwd=%s\\n", executable);
-                  }
-              }
-
-              setenv("SDL_TOUCH_MOUSE_EVENTS", "1", 1);
-          }
-          ''')
+          print("Patched top-level CMakeLists.txt")
+          print("No SDL2 find_package anchor is required anymore.")
           PY
+
+          echo "===== IOS PATCH ====="
+          tail -80 SRB2/CMakeLists.txt
+          echo "===== BOOTSTRAP ====="
+          sed -n '1,220p' SRB2/src/sdl/ios_bootstrap.c
 
       - name: Configure iPhone arm64 build
         id: configure
@@ -366,8 +404,8 @@ jobs:
           rm -rf Payload
           mkdir Payload
           cp -a stage/SRB2.app Payload/
-          zip -qry Sonic-Robo-Blast-2-iOS-v4-UNSIGNED.ipa Payload
-          ls -lh Sonic-Robo-Blast-2-iOS-v4-UNSIGNED.ipa
+          zip -qry Sonic-Robo-Blast-2-iOS-v5-UNSIGNED.ipa Payload
+          ls -lh Sonic-Robo-Blast-2-iOS-v5-UNSIGNED.ipa
 
       - name: Save build logs
         if: always()
@@ -376,7 +414,7 @@ jobs:
           set +e
           mkdir -p output
           {
-            echo "SRB2 iOS v4"
+            echo "SRB2 iOS v5"
             echo "CONFIGURE=${{ steps.configure.outcome }}"
             echo "BUILD=${{ steps.build.outcome }}"
             echo "APP=${{ steps.app.outcome }}"
@@ -392,8 +430,8 @@ jobs:
         if: steps.ipa.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
-          name: Sonic-Robo-Blast-2-iOS-v4-UNSIGNED
-          path: Sonic-Robo-Blast-2-iOS-v4-UNSIGNED.ipa
+          name: Sonic-Robo-Blast-2-iOS-v5-UNSIGNED
+          path: Sonic-Robo-Blast-2-iOS-v5-UNSIGNED.ipa
           if-no-files-found: error
           retention-days: 7
           compression-level: 0
@@ -402,7 +440,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: Sonic-Robo-Blast-2-iOS-v4-Logs
+          name: Sonic-Robo-Blast-2-iOS-v5-Logs
           path: output
           if-no-files-found: ignore
           retention-days: 7
@@ -413,9 +451,9 @@ jobs:
         shell: bash
         run: |
           if [ "${{ steps.ipa.outcome }}" = "success" ]; then
-            echo "SUCCESS: Sonic Robo Blast 2 iOS v4 IPA created."
+            echo "SUCCESS: Sonic Robo Blast 2 iOS v5 IPA created."
           else
-            echo "Sonic Robo Blast 2 iOS v4 did not reach IPA yet."
-            echo "Download Sonic-Robo-Blast-2-iOS-v4-Logs and send it to ChatGPT."
+            echo "Sonic Robo Blast 2 iOS v5 did not reach IPA yet."
+            echo "Download Sonic-Robo-Blast-2-iOS-v5-Logs and send it to ChatGPT."
             exit 1
           fi
