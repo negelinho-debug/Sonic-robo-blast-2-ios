@@ -1,0 +1,453 @@
+name: SRB2 iOS - v2 ANDROID APK ASSETS
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-ios:
+    runs-on: macos-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout SRB2 2.2.13 source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch SRB2_release_2.2.13 \
+            https://github.com/STJr/SRB2.git SRB2
+          mkdir -p output
+          (cd SRB2 && git rev-parse HEAD) | tee output/source.txt
+
+      - name: Download exact SRB2 Android v2.2.13 patch1 APK
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          mkdir -p output apk-src
+
+          python3 <<'PY'
+          import json
+          import urllib.request
+          from pathlib import Path
+
+          api = (
+              "https://api.github.com/repos/"
+              "SRB2-Mobile/SRB2-Android/releases/tags/"
+              "android-port-build-v2213-patch1"
+          )
+
+          req = urllib.request.Request(
+              api,
+              headers={
+                  "Accept": "application/vnd.github+json",
+                  "User-Agent": "SRB2-iOS-GitHub-Actions"
+              }
+          )
+
+          with urllib.request.urlopen(req, timeout=60) as r:
+              release = json.load(r)
+
+          assets = release.get("assets", [])
+          candidates = [
+              a for a in assets
+              if a.get("name", "").lower().endswith(".apk")
+              and "gamefull" in a.get("name", "").lower()
+          ]
+
+          if not candidates:
+              candidates = [
+                  a for a in assets
+                  if a.get("name", "").lower().endswith(".apk")
+              ]
+
+          if not candidates:
+              raise SystemExit("No APK asset found in android-port-build-v2213-patch1")
+
+          asset = candidates[0]
+
+          Path("output/android-release.json").write_text(
+              json.dumps(
+                  {
+                      "tag": release.get("tag_name"),
+                      "name": release.get("name"),
+                      "asset": asset.get("name"),
+                      "url": asset.get("browser_download_url"),
+                  },
+                  indent=2
+              )
+          )
+
+          Path("output/apk-url.txt").write_text(
+              asset["browser_download_url"] + "\n"
+          )
+
+          print("APK_ASSET=", asset["name"])
+          print("APK_URL=", asset["browser_download_url"])
+          PY
+
+          APK_URL="$(cat output/apk-url.txt)"
+
+          curl -L --fail --retry 4 \
+            "$APK_URL" \
+            -o SRB2-Android-v2213-patch1.apk
+
+          unzip -oq SRB2-Android-v2213-patch1.apk -d apk-src
+
+          echo "===== APK ASSETS ====="
+          find apk-src/assets -maxdepth 3 -type f -print | sort | tee output/apk-assets.txt
+
+          # Verify this is the same family as the APK supplied by the user.
+          test -f apk-src/lib/arm64-v8a/libmain.so
+          strings apk-src/lib/arm64-v8a/libmain.so \
+            | grep -m1 "Sonic Robo Blast 2 v2.2.13" \
+            | tee output/apk-version.txt
+
+          # Exact launcher icon found in the supplied APK.
+          if [ -f apk-src/res/C9.png ]; then
+            cp apk-src/res/C9.png output/SRB2-Android-Icon.png
+          elif [ -f apk-src/res/CG.png ]; then
+            cp apk-src/res/CG.png output/SRB2-Android-Icon.png
+          else
+            echo "ERROR: 192x192 Android launcher icon not found"
+            exit 1
+          fi
+
+          test -f apk-src/assets/splash.png
+          cp apk-src/assets/splash.png output/SRB2-Android-Splash.png
+
+          for f in \
+            android.pk3 \
+            srb2.pk3 \
+            zones.pk3 \
+            player.dta \
+            patch.pk3 \
+            music.dta
+          do
+            if [ -f "apk-src/assets/$f" ]; then
+              echo "$f=FOUND"
+            else
+              echo "$f=MISSING"
+            fi
+          done | tee output/game-data.txt
+
+      - name: Install build tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          brew install cmake ninja pkg-config || true
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-path
+
+      - name: Bootstrap vcpkg for iPhone arm64
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --depth 1 https://github.com/microsoft/vcpkg.git vcpkg
+          ./vcpkg/bootstrap-vcpkg.sh -disableMetrics
+          ./vcpkg/vcpkg install \
+            zlib:arm64-ios \
+            libpng:arm64-ios \
+            sdl2:arm64-ios
+
+      - name: Patch SRB2 for iOS first boot
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 <<'PY'
+          from pathlib import Path
+
+          root = Path("SRB2")
+          top = root / "CMakeLists.txt"
+          s = top.read_text()
+          s = s.replace("find_package(CURL REQUIRED)", "find_package(CURL QUIET)")
+          top.write_text(s)
+
+          cm = root / "src" / "sdl" / "CMakeLists.txt"
+          s = cm.read_text()
+          anchor = "find_package(SDL2 REQUIRED)\n"
+          ios = r'''
+          if("${CMAKE_SYSTEM_NAME}" STREQUAL "iOS")
+              if(TARGET SDL2::SDL2main)
+                  target_link_libraries(SRB2SDL2 PRIVATE SDL2::SDL2main)
+              elseif(TARGET SDL2main)
+                  target_link_libraries(SRB2SDL2 PRIVATE SDL2main)
+              endif()
+              target_link_libraries(SRB2SDL2 PRIVATE
+                  "-framework UIKit"
+                  "-framework Foundation"
+                  "-framework CoreGraphics"
+                  "-framework CoreMotion"
+                  "-framework AVFoundation"
+                  "-framework AudioToolbox"
+                  "-framework GameController"
+                  "-framework OpenGLES"
+                  "-framework Metal"
+                  "-framework QuartzCore"
+              )
+          endif()
+          '''
+          if anchor not in s:
+              raise SystemExit("SDL2 find_package anchor not found")
+          if ios not in s:
+              s = s.replace(anchor, anchor + ios, 1)
+
+          pre = r'''
+          if("${CMAKE_SYSTEM_NAME}" STREQUAL "iOS")
+              target_sources(SRB2SDL2 PRIVATE ios_bootstrap.c)
+              target_compile_definitions(SRB2SDL2 PRIVATE -DNOEXECINFO -DSRB2_IOS_PORT)
+          endif()
+
+          '''
+          if pre not in s:
+              s = pre + s
+          cm.write_text(s)
+
+          (root / "src" / "sdl" / "ios_bootstrap.c").write_text(r'''
+          #include <mach-o/dyld.h>
+          #include <limits.h>
+          #include <stdio.h>
+          #include <stdlib.h>
+          #include <string.h>
+          #include <sys/stat.h>
+          #include <unistd.h>
+
+          static void mkdir_if_needed(const char *path)
+          {
+              if (path && path[0]) mkdir(path, 0755);
+          }
+
+          __attribute__((constructor))
+          static void SRB2_iOS_Bootstrap(void)
+          {
+              const char *home = getenv("HOME");
+              if (home)
+              {
+                  char documents[PATH_MAX];
+                  char addons[PATH_MAX];
+                  char logfile[PATH_MAX];
+                  snprintf(documents, sizeof(documents), "%s/Documents", home);
+                  snprintf(addons, sizeof(addons), "%s/Documents/Addons", home);
+                  snprintf(logfile, sizeof(logfile), "%s/Documents/SRB2-runtime.log", home);
+                  mkdir_if_needed(documents);
+                  mkdir_if_needed(addons);
+                  freopen(logfile, "a", stdout);
+                  freopen(logfile, "a", stderr);
+                  setvbuf(stdout, NULL, _IONBF, 0);
+                  setvbuf(stderr, NULL, _IONBF, 0);
+                  fprintf(stderr, "\\n=== SRB2 iOS launch ===\\n");
+              }
+
+              char executable[PATH_MAX];
+              uint32_t size = (uint32_t)sizeof(executable);
+              if (_NSGetExecutablePath(executable, &size) == 0)
+              {
+                  executable[sizeof(executable)-1] = '\\0';
+                  char *slash = strrchr(executable, '/');
+                  if (slash)
+                  {
+                      *slash = '\\0';
+                      chdir(executable);
+                      fprintf(stderr, "bundle_cwd=%s\\n", executable);
+                  }
+              }
+
+              setenv("SDL_TOUCH_MOUSE_EVENTS", "1", 1);
+          }
+          ''')
+          PY
+
+      - name: Configure SRB2 for arm64 iPhone
+        id: configure
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          rm -rf build
+          cmake \
+            -S SRB2 \
+            -B build \
+            -G Xcode \
+            -DCMAKE_TOOLCHAIN_FILE="$PWD/vcpkg/scripts/buildsystems/vcpkg.cmake" \
+            -DVCPKG_TARGET_TRIPLET=arm64-ios \
+            -DCMAKE_SYSTEM_NAME=iOS \
+            -DCMAKE_OSX_SYSROOT=iphoneos \
+            -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=15.0 \
+            -DSRB2_CONFIG_HWRENDER=OFF \
+            -DSRB2_CONFIG_USE_GME=OFF \
+            -DSRB2_CONFIG_EXECINFO=OFF \
+            -DSRB2_CONFIG_ERRORMODE=OFF \
+            -DSRB2_SDL2_EXE_NAME=SRB2 \
+            -DCMAKE_BUILD_TYPE=Release \
+            2>&1 | tee output/cmake-configure.log
+
+      - name: Build SRB2 arm64 iPhone app
+        id: build
+        if: steps.configure.outcome == 'success'
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          cmake --build build \
+            --config Release \
+            --target SRB2SDL2 \
+            -- \
+            -sdk iphoneos \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            DEVELOPMENT_TEAM="" \
+            2>&1 | tee output/xcodebuild.log
+
+      - name: Locate or create app bundle
+        id: app
+        if: steps.build.outcome == 'success'
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP="$(find build -type d -name '*.app' | head -1 || true)"
+          rm -rf stage
+          mkdir -p stage
+
+          if [ -n "$APP" ]; then
+            echo "Using generated app: $APP"
+            cp -a "$APP" stage/SRB2.app
+          else
+            BIN="$(find build -type f -perm +111 -name 'SRB2' | head -1 || true)"
+            if [ -z "$BIN" ]; then
+              echo "ERROR: SRB2 arm64 executable not found"
+              exit 1
+            fi
+            mkdir -p stage/SRB2.app
+            cp "$BIN" stage/SRB2.app/SRB2
+          fi
+
+          APP="stage/SRB2.app"
+          chmod +x "$APP/SRB2" 2>/dev/null || true
+          file "$APP/SRB2" | tee output/macho.txt
+          lipo -info "$APP/SRB2" | tee -a output/macho.txt || true
+          file "$APP/SRB2" | grep -q arm64
+          echo "app=$APP" >> "$GITHUB_OUTPUT"
+
+      - name: Add game data plist and icon
+        if: steps.app.outcome == 'success'
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP="${{ steps.app.outputs.app }}"
+
+          # Bundle the exact data from the Android v2.2.13 patch1 APK.
+          # This keeps iOS game data aligned with the user's Android build.
+          cp -a apk-src/assets/. "$APP/"
+
+          # Exact Android launcher artwork.
+          cp output/SRB2-Android-Icon.png "$APP/Icon.png"
+
+          # Generate common iPhone icon sizes from the exact Android icon.
+          sips -z 120 120 output/SRB2-Android-Icon.png --out "$APP/Icon-60@2x.png" >/dev/null
+          sips -z 180 180 output/SRB2-Android-Icon.png --out "$APP/Icon-60@3x.png" >/dev/null
+          sips -z 152 152 output/SRB2-Android-Icon.png --out "$APP/Icon-76@2x.png" >/dev/null
+          sips -z 167 167 output/SRB2-Android-Icon.png --out "$APP/Icon-83.5@2x.png" >/dev/null
+
+          cat > "$APP/Info.plist" <<'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+            "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleDisplayName</key><string>Sonic Robo Blast 2</string>
+            <key>CFBundleExecutable</key><string>SRB2</string>
+            <key>CFBundleIdentifier</key><string>org.stjr.srb2</string>
+            <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+            <key>CFBundleName</key><string>SRB2</string>
+            <key>CFBundlePackageType</key><string>APPL</string>
+            <key>CFBundleShortVersionString</key><string>2.2.13</string>
+            <key>CFBundleVersion</key><string>1</string>
+            <key>LSRequiresIPhoneOS</key><true/>
+            <key>MinimumOSVersion</key><string>15.0</string>
+            <key>UIFileSharingEnabled</key><true/>
+            <key>LSSupportsOpeningDocumentsInPlace</key><true/>
+            <key>UIRequiresFullScreen</key><true/>
+            <key>UISupportedInterfaceOrientations</key>
+            <array>
+              <string>UIInterfaceOrientationLandscapeLeft</string>
+              <string>UIInterfaceOrientationLandscapeRight</string>
+            </array>
+            <key>CFBundleIconFiles</key>
+            <array><string>Icon.png</string></array>
+            <key>UIApplicationSupportsIndirectInputEvents</key><true/>
+          </dict>
+          </plist>
+          PLIST
+
+          find "$APP" -maxdepth 1 -type f -print | sort | tee output/app-files.txt
+
+      - name: Package unsigned IPA
+        id: ipa
+        if: steps.app.outcome == 'success'
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf Payload
+          mkdir Payload
+          cp -a stage/SRB2.app Payload/
+          zip -qry SRB2-iOS-v2-ANDROID-ASSETS-UNSIGNED.ipa Payload
+          ls -lh SRB2-iOS-v2-ANDROID-ASSETS-UNSIGNED.ipa
+
+      - name: Collect diagnostics
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          mkdir -p output
+          {
+            echo "SRB2 iOS v2"
+            echo "CONFIGURE=${{ steps.configure.outcome }}"
+            echo "BUILD=${{ steps.build.outcome }}"
+            echo "APP=${{ steps.app.outcome }}"
+            echo "IPA=${{ steps.ipa.outcome }}"
+            xcodebuild -version
+            cmake --version | head -1
+          } > output/summary.txt
+          find build -maxdepth 6 -type f 2>/dev/null | sort > output/build-files.txt || true
+          tail -500 output/cmake-configure.log > output/cmake-configure-tail.txt 2>/dev/null || true
+          tail -500 output/xcodebuild.log > output/xcodebuild-tail.txt 2>/dev/null || true
+
+      - name: Upload IPA
+        if: steps.ipa.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: SRB2-iOS-v2-ANDROID-ASSETS-UNSIGNED
+          path: SRB2-iOS-v2-ANDROID-ASSETS-UNSIGNED.ipa
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: SRB2-iOS-v2-Diagnostics
+          path: output
+          if-no-files-found: ignore
+          retention-days: 7
+          compression-level: 0
+
+      - name: Final status
+        if: always()
+        shell: bash
+        run: |
+          if [ "${{ steps.ipa.outcome }}" = "success" ]; then
+            echo "SUCCESS: SRB2 unsigned IPA created."
+          else
+            echo "SRB2 v2 did not reach IPA yet."
+            echo "Download SRB2-iOS-v2-Diagnostics and send it to ChatGPT."
+            exit 1
+          fi
