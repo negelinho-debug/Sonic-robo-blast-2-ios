@@ -29,9 +29,6 @@ jobs:
 
           mkdir -p output apk-src
 
-          # v2 used the GitHub Releases API and hit HTTP 403 rate limiting.
-          # v3 skips the API completely and downloads the exact release asset
-          # directly by its stable GitHub release URL.
           APK_URL="https://github.com/SRB2-Mobile/SRB2-Android/releases/download/android-port-build-v2213-patch1/srb2-android-v2213-gameFull-release-patch1.apk"
 
           echo "$APK_URL" | tee output/apk-url.txt
@@ -54,10 +51,6 @@ jobs:
 
           test -f apk-src/lib/arm64-v8a/libmain.so
 
-          # Do NOT pipe strings directly into `grep -m1` under
-          # `set -o pipefail`: grep exits after the first match, which closes
-          # the pipe and makes Apple's `strings` report "failed to flush output".
-          # v3 died here even though the APK was downloaded/extracted correctly.
           strings apk-src/lib/arm64-v8a/libmain.so \
             > output/libmain-strings.txt 2>/dev/null || true
 
@@ -75,7 +68,6 @@ jobs:
           printf '%s\n' "$VERSION_LINE" \
             | tee output/apk-version.txt
 
-          # Exact launcher icon from the supplied Android build.
           if [ -f apk-src/res/C9.png ]; then
             cp apk-src/res/C9.png output/SRB2-Android-Icon.png
           elif [ -f apk-src/res/CG.png ]; then
@@ -194,10 +186,6 @@ jobs:
 
           top = Path("SRB2/CMakeLists.txt")
           s = top.read_text(encoding="utf-8")
-
-          # v4 expected a literal SDL2 find_package line inside
-          # src/sdl/CMakeLists.txt. SRB2 2.2.13 does not have that exact
-          # layout, so v5 no longer patches src/sdl/CMakeLists.txt at all.
 
           s = re.sub(
               r'find_package\s*\(\s*CURL\s+REQUIRED\s*\)',
@@ -348,14 +336,10 @@ jobs:
           set -euo pipefail
           APP="${{ steps.app.outputs.app }}"
 
-          # Bundle the exact data from the Android v2.2.13 patch1 APK.
-          # This keeps iOS game data aligned with the user's Android build.
           cp -a apk-src/assets/. "$APP/"
 
-          # Exact Android launcher artwork.
           cp output/SRB2-Android-Icon.png "$APP/Icon.png"
 
-          # Generate common iPhone icon sizes from the exact Android icon.
           sips -z 120 120 output/SRB2-Android-Icon.png --out "$APP/Icon-60@2x.png" >/dev/null
           sips -z 180 180 output/SRB2-Android-Icon.png --out "$APP/Icon-60@3x.png" >/dev/null
           sips -z 152 152 output/SRB2-Android-Icon.png --out "$APP/Icon-76@2x.png" >/dev/null
