@@ -1,4 +1,4 @@
-name: Sonic Robo Blast 2 iOS Port v7
+name: Sonic Robo Blast 2 iOS Port v8
 
 on:
   workflow_dispatch:
@@ -8,7 +8,7 @@ permissions:
 
 jobs:
   build-ios:
-    name: Build Sonic Robo Blast 2 iOS IPA v7
+    name: Build Sonic Robo Blast 2 iOS IPA v8
     runs-on: macos-latest
     timeout-minutes: 45
 
@@ -234,11 +234,30 @@ jobs:
           )
           print(f"iOS ccache patch count: {ccache_patches}")
 
+          # curl 7.86 defaults to OpenSSL when CMAKE_SYSTEM_NAME is iOS.
+          # iPhoneOS has Apple's Security/SecureTransport instead, so force
+          # curl to use that backend and never try to find desktop OpenSSL.
+          curl_file = Path("SRB2/thirdparty/cpm-curl.cmake")
+          curl_text = curl_file.read_text(encoding="utf-8")
+          ios_curl_block = r"""
+          if(APPLE AND "${CMAKE_SYSTEM_NAME}" STREQUAL "iOS")
+              list(APPEND internal_curl_options "CURL_USE_OPENSSL OFF")
+              list(APPEND internal_curl_options "CURL_USE_SECTRANSP ON")
+          endif()
+          """
+          anchor = 'CPMAddPackage(\n\tNAME curl'
+          if ios_curl_block.strip() not in curl_text:
+              if anchor not in curl_text:
+                  raise SystemExit("ERROR: curl CPM anchor not found")
+              curl_text = curl_text.replace(anchor, ios_curl_block + "\n" + anchor, 1)
+              curl_file.write_text(curl_text, encoding="utf-8")
+          Path("output/curl-ios-patch.txt").write_text(ios_curl_block, encoding="utf-8")
+
           ios_patch = r"""
 
-          # ===== SRB2 iOS PORT v7 =====
+          # ===== SRB2 iOS PORT v8 =====
           if(APPLE AND "${CMAKE_SYSTEM_NAME}" STREQUAL "iOS")
-              message(STATUS "Applying SRB2 iOS v7 target patch")
+              message(STATUS "Applying SRB2 iOS v8 target patch")
 
               if(NOT TARGET SRB2SDL2)
                   message(FATAL_ERROR "SRB2SDL2 target was not created by upstream CMake")
@@ -272,10 +291,10 @@ jobs:
                   "-framework QuartzCore"
               )
           endif()
-          # ===== END SRB2 iOS PORT v7 =====
+          # ===== END SRB2 iOS PORT v8 =====
           """
 
-          if "SRB2 iOS PORT v7" not in s:
+          if "SRB2 iOS PORT v8" not in s:
               s = s.rstrip() + "\n" + ios_patch + "\n"
 
           top.write_text(s, encoding="utf-8")
@@ -291,6 +310,8 @@ jobs:
 
           echo "===== IOS PATCH ====="
           tail -80 SRB2/CMakeLists.txt
+          echo "===== CURL IOS PATCH ====="
+          sed -n '1,90p' SRB2/thirdparty/cpm-curl.cmake
           echo "===== BOOTSTRAP ====="
           sed -n '1,220p' SRB2/src/sdl/ios_bootstrap.c
 
@@ -311,6 +332,8 @@ jobs:
             -DCMAKE_OSX_ARCHITECTURES=arm64 \
             -DCMAKE_OSX_DEPLOYMENT_TARGET=15.0 \
             -DSRB2_CONFIG_ENABLE_TESTS=OFF \
+            -DCURL_USE_OPENSSL=OFF \
+            -DCURL_USE_SECTRANSP=ON \
             -DSRB2_CONFIG_HWRENDER=OFF \
             -DSRB2_CONFIG_USE_GME=OFF \
             -DSRB2_CONFIG_EXECINFO=OFF \
@@ -424,8 +447,8 @@ jobs:
           rm -rf Payload
           mkdir Payload
           cp -a stage/SRB2.app Payload/
-          zip -qry Sonic-Robo-Blast-2-iOS-v7-UNSIGNED.ipa Payload
-          ls -lh Sonic-Robo-Blast-2-iOS-v7-UNSIGNED.ipa
+          zip -qry Sonic-Robo-Blast-2-iOS-v8-UNSIGNED.ipa Payload
+          ls -lh Sonic-Robo-Blast-2-iOS-v8-UNSIGNED.ipa
 
       - name: Save build logs
         if: always()
@@ -434,7 +457,7 @@ jobs:
           set +e
           mkdir -p output
           {
-            echo "SRB2 iOS v7"
+            echo "SRB2 iOS v8"
             echo "CONFIGURE=${{ steps.configure.outcome }}"
             echo "BUILD=${{ steps.build.outcome }}"
             echo "APP=${{ steps.app.outcome }}"
@@ -450,8 +473,8 @@ jobs:
         if: steps.ipa.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
-          name: Sonic-Robo-Blast-2-iOS-v7-UNSIGNED
-          path: Sonic-Robo-Blast-2-iOS-v7-UNSIGNED.ipa
+          name: Sonic-Robo-Blast-2-iOS-v8-UNSIGNED
+          path: Sonic-Robo-Blast-2-iOS-v8-UNSIGNED.ipa
           if-no-files-found: error
           retention-days: 7
           compression-level: 0
@@ -460,7 +483,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: Sonic-Robo-Blast-2-iOS-v7-Logs
+          name: Sonic-Robo-Blast-2-iOS-v8-Logs
           path: output
           if-no-files-found: ignore
           retention-days: 7
@@ -471,9 +494,9 @@ jobs:
         shell: bash
         run: |
           if [ "${{ steps.ipa.outcome }}" = "success" ]; then
-            echo "SUCCESS: Sonic Robo Blast 2 iOS v7 IPA created."
+            echo "SUCCESS: Sonic Robo Blast 2 iOS v8 IPA created."
           else
             echo "The build stopped before the IPA was created."
             echo "The FIRST red step above is now the real error."
-            echo "Sonic-Robo-Blast-2-iOS-v7-Logs was uploaded for diagnostics."
+            echo "Sonic-Robo-Blast-2-iOS-v8-Logs was uploaded for diagnostics."
           fi
