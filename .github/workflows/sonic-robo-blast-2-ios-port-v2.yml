@@ -1,4 +1,4 @@
-name: Sonic Robo Blast 2 iOS Port v6
+name: Sonic Robo Blast 2 iOS Port v7
 
 on:
   workflow_dispatch:
@@ -8,7 +8,7 @@ permissions:
 
 jobs:
   build-ios:
-    name: Build Sonic Robo Blast 2 iOS IPA v6
+    name: Build Sonic Robo Blast 2 iOS IPA v7
     runs-on: macos-latest
     timeout-minutes: 45
 
@@ -107,10 +107,20 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          brew install cmake ninja pkg-config || true
+
+          # Do not use Homebrew CMake 4.x here. SRB2 2.2.13 pulls older
+          # third-party CMake projects that are much more reliable on CMake 3.x.
+          brew install ninja pkg-config || true
+
+          python3 -m venv "$RUNNER_TEMP/srb2-cmake"
+          "$RUNNER_TEMP/srb2-cmake/bin/python" -m pip install --upgrade pip
+          "$RUNNER_TEMP/srb2-cmake/bin/pip" install "cmake==3.31.6"
+
+          # GITHUB_PATH is applied to every following step.
+          echo "$RUNNER_TEMP/srb2-cmake/bin" >> "$GITHUB_PATH"
+
           xcodebuild -version
-          cmake --version
-          echo "v6: CMake 4 compatibility workaround enabled via CMAKE_POLICY_VERSION_MINIMUM=3.5"
+          "$RUNNER_TEMP/srb2-cmake/bin/cmake" --version
           xcrun --sdk iphoneos --show-sdk-path
 
       - name: Prepare SDL2 libraries for iPhone arm64
@@ -209,11 +219,26 @@ jobs:
               flags=re.IGNORECASE
           )
 
+          # The upstream file always downloads Ccache.cmake on non-Windows
+          # hosts. It is optional and not useful for this one-shot iOS CI build.
+          ccache_pattern = re.compile(
+              r'else\(\)\s*'
+              r'(CPMAddPackage\(\s*NAME\s+Ccache\.cmake.*?VERSION\s+1\.2\s*\))\s*'
+              r'endif\(\)',
+              re.IGNORECASE | re.DOTALL
+          )
+          s, ccache_patches = ccache_pattern.subn(
+              r'elseif(NOT (APPLE AND "${CMAKE_SYSTEM_NAME}" STREQUAL "iOS"))\n    \1\nendif()',
+              s,
+              count=1
+          )
+          print(f"iOS ccache patch count: {ccache_patches}")
+
           ios_patch = r"""
 
-          # ===== SRB2 iOS PORT v6 =====
+          # ===== SRB2 iOS PORT v7 =====
           if(APPLE AND "${CMAKE_SYSTEM_NAME}" STREQUAL "iOS")
-              message(STATUS "Applying SRB2 iOS v6 target patch")
+              message(STATUS "Applying SRB2 iOS v7 target patch")
 
               if(NOT TARGET SRB2SDL2)
                   message(FATAL_ERROR "SRB2SDL2 target was not created by upstream CMake")
@@ -247,10 +272,10 @@ jobs:
                   "-framework QuartzCore"
               )
           endif()
-          # ===== END SRB2 iOS PORT v6 =====
+          # ===== END SRB2 iOS PORT v7 =====
           """
 
-          if "SRB2 iOS PORT v6" not in s:
+          if "SRB2 iOS PORT v7" not in s:
               s = s.rstrip() + "\n" + ios_patch + "\n"
 
           top.write_text(s, encoding="utf-8")
@@ -271,7 +296,6 @@ jobs:
 
       - name: Configure iPhone arm64 build
         id: configure
-        continue-on-error: true
         shell: bash
         run: |
           set -o pipefail
@@ -286,19 +310,17 @@ jobs:
             -DCMAKE_OSX_SYSROOT=iphoneos \
             -DCMAKE_OSX_ARCHITECTURES=arm64 \
             -DCMAKE_OSX_DEPLOYMENT_TARGET=15.0 \
+            -DSRB2_CONFIG_ENABLE_TESTS=OFF \
             -DSRB2_CONFIG_HWRENDER=OFF \
             -DSRB2_CONFIG_USE_GME=OFF \
             -DSRB2_CONFIG_EXECINFO=OFF \
             -DSRB2_CONFIG_ERRORMODE=OFF \
             -DSRB2_SDL2_EXE_NAME=SRB2 \
-            -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
             -DCMAKE_BUILD_TYPE=Release \
             2>&1 | tee output/cmake-configure.log
 
       - name: Build Sonic Robo Blast 2 for iPhone
         id: build
-        if: steps.configure.outcome == 'success'
-        continue-on-error: true
         shell: bash
         run: |
           set -o pipefail
@@ -315,8 +337,6 @@ jobs:
 
       - name: Locate or create app bundle
         id: app
-        if: steps.build.outcome == 'success'
-        continue-on-error: true
         shell: bash
         run: |
           set -euo pipefail
@@ -345,7 +365,6 @@ jobs:
           echo "app=$APP" >> "$GITHUB_OUTPUT"
 
       - name: Add game data plist and icon
-        if: steps.app.outcome == 'success'
         shell: bash
         run: |
           set -euo pipefail
@@ -399,16 +418,14 @@ jobs:
 
       - name: Create unsigned IPA
         id: ipa
-        if: steps.app.outcome == 'success'
-        continue-on-error: true
         shell: bash
         run: |
           set -euo pipefail
           rm -rf Payload
           mkdir Payload
           cp -a stage/SRB2.app Payload/
-          zip -qry Sonic-Robo-Blast-2-iOS-v6-UNSIGNED.ipa Payload
-          ls -lh Sonic-Robo-Blast-2-iOS-v6-UNSIGNED.ipa
+          zip -qry Sonic-Robo-Blast-2-iOS-v7-UNSIGNED.ipa Payload
+          ls -lh Sonic-Robo-Blast-2-iOS-v7-UNSIGNED.ipa
 
       - name: Save build logs
         if: always()
@@ -417,7 +434,7 @@ jobs:
           set +e
           mkdir -p output
           {
-            echo "SRB2 iOS v6"
+            echo "SRB2 iOS v7"
             echo "CONFIGURE=${{ steps.configure.outcome }}"
             echo "BUILD=${{ steps.build.outcome }}"
             echo "APP=${{ steps.app.outcome }}"
@@ -433,8 +450,8 @@ jobs:
         if: steps.ipa.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
-          name: Sonic-Robo-Blast-2-iOS-v6-UNSIGNED
-          path: Sonic-Robo-Blast-2-iOS-v6-UNSIGNED.ipa
+          name: Sonic-Robo-Blast-2-iOS-v7-UNSIGNED
+          path: Sonic-Robo-Blast-2-iOS-v7-UNSIGNED.ipa
           if-no-files-found: error
           retention-days: 7
           compression-level: 0
@@ -443,7 +460,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: Sonic-Robo-Blast-2-iOS-v6-Logs
+          name: Sonic-Robo-Blast-2-iOS-v7-Logs
           path: output
           if-no-files-found: ignore
           retention-days: 7
@@ -454,9 +471,9 @@ jobs:
         shell: bash
         run: |
           if [ "${{ steps.ipa.outcome }}" = "success" ]; then
-            echo "SUCCESS: Sonic Robo Blast 2 iOS v6 IPA created."
+            echo "SUCCESS: Sonic Robo Blast 2 iOS v7 IPA created."
           else
-            echo "Sonic Robo Blast 2 iOS v6 did not reach IPA yet."
-            echo "Download Sonic-Robo-Blast-2-iOS-v6-Logs and send it to ChatGPT."
-            exit 1
+            echo "The build stopped before the IPA was created."
+            echo "The FIRST red step above is now the real error."
+            echo "Sonic-Robo-Blast-2-iOS-v7-Logs was uploaded for diagnostics."
           fi
