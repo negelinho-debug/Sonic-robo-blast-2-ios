@@ -1,4 +1,4 @@
-name: Sonic Robo Blast 2 iOS Port v8
+name: Sonic Robo Blast 2 iOS Port v9
 
 on:
   workflow_dispatch:
@@ -8,7 +8,7 @@ permissions:
 
 jobs:
   build-ios:
-    name: Build Sonic Robo Blast 2 iOS IPA v8
+    name: Build Sonic Robo Blast 2 iOS IPA v9
     runs-on: macos-latest
     timeout-minutes: 45
 
@@ -253,11 +253,39 @@ jobs:
               curl_file.write_text(curl_text, encoding="utf-8")
           Path("output/curl-ios-patch.txt").write_text(ios_curl_block, encoding="utf-8")
 
+          # SRB2 declares SRB2SDL2 as MACOSX_BUNDLE on Apple platforms,
+          # but its non-Darwin install() branch only has RUNTIME DESTINATION.
+          # CMake therefore rejects iOS during configure. Add the required
+          # BUNDLE destination to that install rule while keeping desktop rules intact.
+          sdl_cmake = Path("SRB2/src/sdl/CMakeLists.txt")
+          sdl_text = sdl_cmake.read_text(encoding="utf-8")
+          install_pattern = re.compile(
+              r'install\s*\(\s*TARGETS\s+SRB2SDL2\s+SRB2SDL2\s*'
+              r'RUNTIME\s+DESTINATION\s+\.\s*\)',
+              re.IGNORECASE | re.DOTALL
+          )
+          install_replacement = """install(TARGETS SRB2SDL2 SRB2SDL2
+              RUNTIME DESTINATION .
+              BUNDLE DESTINATION .
+          )"""
+          sdl_text, install_patches = install_pattern.subn(
+              install_replacement, sdl_text, count=1
+          )
+          if install_patches != 1:
+              raise SystemExit(
+                  f"ERROR: expected exactly one SRB2SDL2 install rule, patched {install_patches}"
+              )
+          sdl_cmake.write_text(sdl_text, encoding="utf-8")
+          Path("output/ios-bundle-install-patch.txt").write_text(
+              install_replacement + "\n", encoding="utf-8"
+          )
+          print("Patched SRB2SDL2 install rule with BUNDLE DESTINATION .")
+
           ios_patch = r"""
 
-          # ===== SRB2 iOS PORT v8 =====
+          # ===== SRB2 iOS PORT v9 =====
           if(APPLE AND "${CMAKE_SYSTEM_NAME}" STREQUAL "iOS")
-              message(STATUS "Applying SRB2 iOS v8 target patch")
+              message(STATUS "Applying SRB2 iOS v9 target patch")
 
               if(NOT TARGET SRB2SDL2)
                   message(FATAL_ERROR "SRB2SDL2 target was not created by upstream CMake")
@@ -291,10 +319,10 @@ jobs:
                   "-framework QuartzCore"
               )
           endif()
-          # ===== END SRB2 iOS PORT v8 =====
+          # ===== END SRB2 iOS PORT v9 =====
           """
 
-          if "SRB2 iOS PORT v8" not in s:
+          if "SRB2 iOS PORT v9" not in s:
               s = s.rstrip() + "\n" + ios_patch + "\n"
 
           top.write_text(s, encoding="utf-8")
@@ -310,6 +338,8 @@ jobs:
 
           echo "===== IOS PATCH ====="
           tail -80 SRB2/CMakeLists.txt
+          echo "===== IOS BUNDLE INSTALL PATCH ====="
+          sed -n '72,96p' SRB2/src/sdl/CMakeLists.txt
           echo "===== CURL IOS PATCH ====="
           sed -n '1,90p' SRB2/thirdparty/cpm-curl.cmake
           echo "===== BOOTSTRAP ====="
@@ -447,8 +477,8 @@ jobs:
           rm -rf Payload
           mkdir Payload
           cp -a stage/SRB2.app Payload/
-          zip -qry Sonic-Robo-Blast-2-iOS-v8-UNSIGNED.ipa Payload
-          ls -lh Sonic-Robo-Blast-2-iOS-v8-UNSIGNED.ipa
+          zip -qry Sonic-Robo-Blast-2-iOS-v9-UNSIGNED.ipa Payload
+          ls -lh Sonic-Robo-Blast-2-iOS-v9-UNSIGNED.ipa
 
       - name: Save build logs
         if: always()
@@ -457,7 +487,7 @@ jobs:
           set +e
           mkdir -p output
           {
-            echo "SRB2 iOS v8"
+            echo "SRB2 iOS v9"
             echo "CONFIGURE=${{ steps.configure.outcome }}"
             echo "BUILD=${{ steps.build.outcome }}"
             echo "APP=${{ steps.app.outcome }}"
@@ -473,8 +503,8 @@ jobs:
         if: steps.ipa.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
-          name: Sonic-Robo-Blast-2-iOS-v8-UNSIGNED
-          path: Sonic-Robo-Blast-2-iOS-v8-UNSIGNED.ipa
+          name: Sonic-Robo-Blast-2-iOS-v9-UNSIGNED
+          path: Sonic-Robo-Blast-2-iOS-v9-UNSIGNED.ipa
           if-no-files-found: error
           retention-days: 7
           compression-level: 0
@@ -483,7 +513,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: Sonic-Robo-Blast-2-iOS-v8-Logs
+          name: Sonic-Robo-Blast-2-iOS-v9-Logs
           path: output
           if-no-files-found: ignore
           retention-days: 7
@@ -494,9 +524,9 @@ jobs:
         shell: bash
         run: |
           if [ "${{ steps.ipa.outcome }}" = "success" ]; then
-            echo "SUCCESS: Sonic Robo Blast 2 iOS v8 IPA created."
+            echo "SUCCESS: Sonic Robo Blast 2 iOS v9 IPA created."
           else
             echo "The build stopped before the IPA was created."
             echo "The FIRST red step above is now the real error."
-            echo "Sonic-Robo-Blast-2-iOS-v8-Logs was uploaded for diagnostics."
+            echo "Sonic-Robo-Blast-2-iOS-v9-Logs was uploaded for diagnostics."
           fi
