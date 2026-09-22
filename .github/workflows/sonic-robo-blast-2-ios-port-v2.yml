@@ -1,4 +1,4 @@
-name: Sonic Robo Blast 2 iOS Port v3
+name: Sonic Robo Blast 2 iOS Port v4
 
 on:
   workflow_dispatch:
@@ -8,7 +8,7 @@ permissions:
 
 jobs:
   build-ios:
-    name: Build Sonic Robo Blast 2 iOS IPA v3
+    name: Build Sonic Robo Blast 2 iOS IPA v4
     runs-on: macos-latest
     timeout-minutes: 45
 
@@ -54,8 +54,25 @@ jobs:
 
           test -f apk-src/lib/arm64-v8a/libmain.so
 
+          # Do NOT pipe strings directly into `grep -m1` under
+          # `set -o pipefail`: grep exits after the first match, which closes
+          # the pipe and makes Apple's `strings` report "failed to flush output".
+          # v3 died here even though the APK was downloaded/extracted correctly.
           strings apk-src/lib/arm64-v8a/libmain.so \
-            | grep -m1 "Sonic Robo Blast 2 v2.2.13" \
+            > output/libmain-strings.txt 2>/dev/null || true
+
+          VERSION_LINE="$(
+            grep -F "Sonic Robo Blast 2 v2.2.13" \
+              output/libmain-strings.txt \
+              | head -1 || true
+          )"
+
+          if [ -z "$VERSION_LINE" ]; then
+            echo "ERROR: expected SRB2 v2.2.13 marker not found in libmain.so"
+            exit 1
+          fi
+
+          printf '%s\n' "$VERSION_LINE" \
             | tee output/apk-version.txt
 
           # Exact launcher icon from the supplied Android build.
@@ -349,8 +366,8 @@ jobs:
           rm -rf Payload
           mkdir Payload
           cp -a stage/SRB2.app Payload/
-          zip -qry Sonic-Robo-Blast-2-iOS-v3-UNSIGNED.ipa Payload
-          ls -lh Sonic-Robo-Blast-2-iOS-v3-UNSIGNED.ipa
+          zip -qry Sonic-Robo-Blast-2-iOS-v4-UNSIGNED.ipa Payload
+          ls -lh Sonic-Robo-Blast-2-iOS-v4-UNSIGNED.ipa
 
       - name: Save build logs
         if: always()
@@ -359,7 +376,7 @@ jobs:
           set +e
           mkdir -p output
           {
-            echo "SRB2 iOS v3"
+            echo "SRB2 iOS v4"
             echo "CONFIGURE=${{ steps.configure.outcome }}"
             echo "BUILD=${{ steps.build.outcome }}"
             echo "APP=${{ steps.app.outcome }}"
@@ -375,8 +392,8 @@ jobs:
         if: steps.ipa.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
-          name: Sonic-Robo-Blast-2-iOS-v3-UNSIGNED
-          path: Sonic-Robo-Blast-2-iOS-v3-UNSIGNED.ipa
+          name: Sonic-Robo-Blast-2-iOS-v4-UNSIGNED
+          path: Sonic-Robo-Blast-2-iOS-v4-UNSIGNED.ipa
           if-no-files-found: error
           retention-days: 7
           compression-level: 0
@@ -385,7 +402,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: Sonic-Robo-Blast-2-iOS-v3-Logs
+          name: Sonic-Robo-Blast-2-iOS-v4-Logs
           path: output
           if-no-files-found: ignore
           retention-days: 7
@@ -396,9 +413,9 @@ jobs:
         shell: bash
         run: |
           if [ "${{ steps.ipa.outcome }}" = "success" ]; then
-            echo "SUCCESS: Sonic Robo Blast 2 iOS v3 IPA created."
+            echo "SUCCESS: Sonic Robo Blast 2 iOS v4 IPA created."
           else
-            echo "Sonic Robo Blast 2 iOS v3 did not reach IPA yet."
-            echo "Download Sonic-Robo-Blast-2-iOS-v3-Logs and send it to ChatGPT."
+            echo "Sonic Robo Blast 2 iOS v4 did not reach IPA yet."
+            echo "Download Sonic-Robo-Blast-2-iOS-v4-Logs and send it to ChatGPT."
             exit 1
           fi
