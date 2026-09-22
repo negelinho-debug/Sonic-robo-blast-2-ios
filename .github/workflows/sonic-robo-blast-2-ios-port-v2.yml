@@ -1,4 +1,4 @@
-name: Sonic Robo Blast 2 iOS Port v9
+name: Sonic Robo Blast 2 iOS Port v10
 
 on:
   workflow_dispatch:
@@ -8,7 +8,7 @@ permissions:
 
 jobs:
   build-ios:
-    name: Build Sonic Robo Blast 2 iOS IPA v9
+    name: Build Sonic Robo Blast 2 iOS IPA v10
     runs-on: macos-latest
     timeout-minutes: 45
 
@@ -132,7 +132,13 @@ jobs:
           ./vcpkg/vcpkg install \
             zlib:arm64-ios \
             libpng:arm64-ios \
-            sdl2:arm64-ios
+            sdl2:arm64-ios \
+            libgme:arm64-ios
+
+          echo "===== VCPKG IOS LIBRARIES ====="
+          find vcpkg/installed/arm64-ios/lib -maxdepth 1 -type f \
+            \( -name '*z*' -o -name '*gme*' \) -print | sort \
+            | tee output/vcpkg-ios-libraries.txt
 
       - name: Patch SRB2 for iOS first boot
         shell: bash
@@ -234,6 +240,77 @@ jobs:
           )
           print(f"iOS ccache patch count: {ccache_patches}")
 
+          # v10: do not compile SRB2's old bundled zlib/libgme with the
+          # current Xcode iPhone toolchain. v9 reached the actual build, where
+          # bundled zlib failed in zutil.c and bundled libgme failed at libtool.
+          # Reuse the arm64-ios libraries vcpkg built before configuration.
+          thirdparty_cmake = Path("SRB2/thirdparty/CMakeLists.txt")
+          thirdparty_text = thirdparty_cmake.read_text(encoding="utf-8")
+
+          zlib_include = 'include("cpm-zlib.cmake")'
+          zlib_replacement = r"""if(APPLE AND "${CMAKE_SYSTEM_NAME}" STREQUAL "iOS")
+              message(STATUS "SRB2 iOS v10: using vcpkg ZLIB")
+              find_package(ZLIB REQUIRED)
+          else()
+              include("cpm-zlib.cmake")
+          endif()"""
+          if zlib_include not in thirdparty_text:
+              raise SystemExit("ERROR: bundled zlib include anchor not found")
+          thirdparty_text = thirdparty_text.replace(
+              zlib_include, zlib_replacement, 1
+          )
+
+          gme_include = 'include("cpm-libgme.cmake")'
+          gme_replacement = r"""if(APPLE AND "${CMAKE_SYSTEM_NAME}" STREQUAL "iOS")
+              message(STATUS "SRB2 iOS v10: using vcpkg libgme")
+
+              set(SRB2_IOS_VCPKG_PREFIX
+                  "${CMAKE_SOURCE_DIR}/../vcpkg/installed/arm64-ios")
+
+              find_path(SRB2_IOS_GME_INCLUDE_DIR
+                  NAMES gme/gme.h
+                  PATHS "${SRB2_IOS_VCPKG_PREFIX}/include"
+                  NO_DEFAULT_PATH)
+
+              find_library(SRB2_IOS_GME_LIBRARY
+                  NAMES gme
+                  PATHS "${SRB2_IOS_VCPKG_PREFIX}/lib"
+                  NO_DEFAULT_PATH)
+
+              if(NOT SRB2_IOS_GME_INCLUDE_DIR OR NOT SRB2_IOS_GME_LIBRARY)
+                  message(FATAL_ERROR
+                      "vcpkg libgme for arm64-ios was not found")
+              endif()
+
+              add_library(gme STATIC IMPORTED GLOBAL)
+              set_target_properties(gme PROPERTIES
+                  IMPORTED_LOCATION "${SRB2_IOS_GME_LIBRARY}"
+                  INTERFACE_INCLUDE_DIRECTORIES
+                      "${SRB2_IOS_GME_INCLUDE_DIR}"
+              )
+
+              # src/CMakeLists.txt also references libgme_SOURCE_DIR when
+              # internal libraries are selected. Point that legacy variable
+              # at the vcpkg include root.
+              set(libgme_SOURCE_DIR
+                  "${SRB2_IOS_GME_INCLUDE_DIR}"
+                  CACHE PATH "" FORCE)
+          else()
+              include("cpm-libgme.cmake")
+          endif()"""
+          if gme_include not in thirdparty_text:
+              raise SystemExit("ERROR: bundled libgme include anchor not found")
+          thirdparty_text = thirdparty_text.replace(
+              gme_include, gme_replacement, 1
+          )
+
+          thirdparty_cmake.write_text(thirdparty_text, encoding="utf-8")
+          Path("output/ios-vcpkg-zlib-gme-patch.txt").write_text(
+              zlib_replacement + "\n\n" + gme_replacement + "\n",
+              encoding="utf-8"
+          )
+          print("Patched iOS build to use vcpkg ZLIB and libgme.")
+
           # curl 7.86 defaults to OpenSSL when CMAKE_SYSTEM_NAME is iOS.
           # iPhoneOS has Apple's Security/SecureTransport instead, so force
           # curl to use that backend and never try to find desktop OpenSSL.
@@ -283,9 +360,9 @@ jobs:
 
           ios_patch = r"""
 
-          # ===== SRB2 iOS PORT v9 =====
+          # ===== SRB2 iOS PORT v10 =====
           if(APPLE AND "${CMAKE_SYSTEM_NAME}" STREQUAL "iOS")
-              message(STATUS "Applying SRB2 iOS v9 target patch")
+              message(STATUS "Applying SRB2 iOS v10 target patch")
 
               if(NOT TARGET SRB2SDL2)
                   message(FATAL_ERROR "SRB2SDL2 target was not created by upstream CMake")
@@ -319,10 +396,10 @@ jobs:
                   "-framework QuartzCore"
               )
           endif()
-          # ===== END SRB2 iOS PORT v9 =====
+          # ===== END SRB2 iOS PORT v10 =====
           """
 
-          if "SRB2 iOS PORT v9" not in s:
+          if "SRB2 iOS PORT v10" not in s:
               s = s.rstrip() + "\n" + ios_patch + "\n"
 
           top.write_text(s, encoding="utf-8")
@@ -340,6 +417,8 @@ jobs:
           tail -80 SRB2/CMakeLists.txt
           echo "===== IOS BUNDLE INSTALL PATCH ====="
           sed -n '72,96p' SRB2/src/sdl/CMakeLists.txt
+          echo "===== IOS ZLIB/LIBGME PATCH ====="
+          cat output/ios-vcpkg-zlib-gme-patch.txt
           echo "===== CURL IOS PATCH ====="
           sed -n '1,90p' SRB2/thirdparty/cpm-curl.cmake
           echo "===== BOOTSTRAP ====="
@@ -365,7 +444,6 @@ jobs:
             -DCURL_USE_OPENSSL=OFF \
             -DCURL_USE_SECTRANSP=ON \
             -DSRB2_CONFIG_HWRENDER=OFF \
-            -DSRB2_CONFIG_USE_GME=OFF \
             -DSRB2_CONFIG_EXECINFO=OFF \
             -DSRB2_CONFIG_ERRORMODE=OFF \
             -DSRB2_SDL2_EXE_NAME=SRB2 \
@@ -477,8 +555,8 @@ jobs:
           rm -rf Payload
           mkdir Payload
           cp -a stage/SRB2.app Payload/
-          zip -qry Sonic-Robo-Blast-2-iOS-v9-UNSIGNED.ipa Payload
-          ls -lh Sonic-Robo-Blast-2-iOS-v9-UNSIGNED.ipa
+          zip -qry Sonic-Robo-Blast-2-iOS-v10-UNSIGNED.ipa Payload
+          ls -lh Sonic-Robo-Blast-2-iOS-v10-UNSIGNED.ipa
 
       - name: Save build logs
         if: always()
@@ -487,7 +565,7 @@ jobs:
           set +e
           mkdir -p output
           {
-            echo "SRB2 iOS v9"
+            echo "SRB2 iOS v10"
             echo "CONFIGURE=${{ steps.configure.outcome }}"
             echo "BUILD=${{ steps.build.outcome }}"
             echo "APP=${{ steps.app.outcome }}"
@@ -497,14 +575,16 @@ jobs:
           } > output/summary.txt
           find build -maxdepth 6 -type f 2>/dev/null | sort > output/build-files.txt || true
           tail -500 output/cmake-configure.log > output/cmake-configure-tail.txt 2>/dev/null || true
-          tail -500 output/xcodebuild.log > output/xcodebuild-tail.txt 2>/dev/null || true
+          tail -800 output/xcodebuild.log > output/xcodebuild-tail.txt 2>/dev/null || true
+          grep -n -E '(^|[[:space:]])(fatal )?error:|Undefined symbols|ld: |clang: error:|libtool: error:' \
+            output/xcodebuild.log > output/xcodebuild-errors.txt 2>/dev/null || true
 
       - name: Upload Sonic Robo Blast 2 IPA
         if: steps.ipa.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
-          name: Sonic-Robo-Blast-2-iOS-v9-UNSIGNED
-          path: Sonic-Robo-Blast-2-iOS-v9-UNSIGNED.ipa
+          name: Sonic-Robo-Blast-2-iOS-v10-UNSIGNED
+          path: Sonic-Robo-Blast-2-iOS-v10-UNSIGNED.ipa
           if-no-files-found: error
           retention-days: 7
           compression-level: 0
@@ -513,7 +593,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: Sonic-Robo-Blast-2-iOS-v9-Logs
+          name: Sonic-Robo-Blast-2-iOS-v10-Logs
           path: output
           if-no-files-found: ignore
           retention-days: 7
@@ -524,9 +604,9 @@ jobs:
         shell: bash
         run: |
           if [ "${{ steps.ipa.outcome }}" = "success" ]; then
-            echo "SUCCESS: Sonic Robo Blast 2 iOS v9 IPA created."
+            echo "SUCCESS: Sonic Robo Blast 2 iOS v10 IPA created."
           else
             echo "The build stopped before the IPA was created."
             echo "The FIRST red step above is now the real error."
-            echo "Sonic-Robo-Blast-2-iOS-v9-Logs was uploaded for diagnostics."
+            echo "Sonic-Robo-Blast-2-iOS-v10-Logs was uploaded for diagnostics."
           fi
