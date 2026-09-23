@@ -1,4 +1,4 @@
-name: Sonic Robo Blast 2 iOS Port v10
+name: Sonic Robo Blast 2 iOS Port v11
 
 on:
   workflow_dispatch:
@@ -8,7 +8,7 @@ permissions:
 
 jobs:
   build-ios:
-    name: Build Sonic Robo Blast 2 iOS IPA v10
+    name: Build Sonic Robo Blast 2 iOS IPA v11
     runs-on: macos-latest
     timeout-minutes: 45
 
@@ -240,17 +240,59 @@ jobs:
           )
           print(f"iOS ccache patch count: {ccache_patches}")
 
-          # v10: do not compile SRB2's old bundled zlib/libgme with the
-          # current Xcode iPhone toolchain. v9 reached the actual build, where
-          # bundled zlib failed in zutil.c and bundled libgme failed at libtool.
-          # Reuse the arm64-ios libraries vcpkg built before configuration.
+          # v11: keep the vcpkg iOS libraries visible from the TOP LEVEL.
+          #
+          # In v10, find_package(ZLIB) ran inside thirdparty/. Imported CMake
+          # targets are directory-scoped unless they are GLOBAL, so src/
+          # could not see ZLIB::ZLIB during the Generate step. That produced
+          # CMake's "... target was not found / an ALIAS target is missing"
+          # error after "Generating done".
+          #
+          # v11 finds ZLIB and PNG in the top-level directory BEFORE
+          # add_subdirectory(thirdparty), so ZLIB::ZLIB and PNG::PNG are
+          # visible to both thirdparty/ and src/. We also skip the old bundled
+          # zlib/libpng builds on iOS. libgme remains a GLOBAL imported target.
+          top_dependency_anchor = "# Dependencies\nadd_subdirectory(thirdparty)"
+          top_ios_dependencies = r"""# SRB2 iOS v11: global vcpkg dependency targets
+          if(APPLE AND "${CMAKE_SYSTEM_NAME}" STREQUAL "iOS")
+              set(SRB2_IOS_VCPKG_PREFIX
+                  "${CMAKE_SOURCE_DIR}/../vcpkg/installed/arm64-ios")
+              list(PREPEND CMAKE_PREFIX_PATH
+                  "${SRB2_IOS_VCPKG_PREFIX}")
+
+              find_package(ZLIB REQUIRED)
+              find_package(PNG REQUIRED)
+
+              if(NOT TARGET ZLIB::ZLIB)
+                  message(FATAL_ERROR
+                      "SRB2 iOS v11: ZLIB::ZLIB target is missing")
+              endif()
+              if(NOT TARGET PNG::PNG)
+                  message(FATAL_ERROR
+                      "SRB2 iOS v11: PNG::PNG target is missing")
+              endif()
+
+              message(STATUS
+                  "SRB2 iOS v11: global ZLIB::ZLIB and PNG::PNG targets ready")
+          endif()
+
+          # Dependencies
+          add_subdirectory(thirdparty)"""
+
+          if top_dependency_anchor not in s:
+              raise SystemExit("ERROR: top-level dependency anchor not found")
+          s = s.replace(
+              top_dependency_anchor,
+              top_ios_dependencies,
+              1
+          )
+
           thirdparty_cmake = Path("SRB2/thirdparty/CMakeLists.txt")
           thirdparty_text = thirdparty_cmake.read_text(encoding="utf-8")
 
           zlib_include = 'include("cpm-zlib.cmake")'
           zlib_replacement = r"""if(APPLE AND "${CMAKE_SYSTEM_NAME}" STREQUAL "iOS")
-              message(STATUS "SRB2 iOS v10: using vcpkg ZLIB")
-              find_package(ZLIB REQUIRED)
+              message(STATUS "SRB2 iOS v11: using top-level vcpkg ZLIB")
           else()
               include("cpm-zlib.cmake")
           endif()"""
@@ -260,9 +302,21 @@ jobs:
               zlib_include, zlib_replacement, 1
           )
 
+          png_include = 'include("cpm-png.cmake")'
+          png_replacement = r"""if(APPLE AND "${CMAKE_SYSTEM_NAME}" STREQUAL "iOS")
+              message(STATUS "SRB2 iOS v11: using top-level vcpkg libpng")
+          else()
+              include("cpm-png.cmake")
+          endif()"""
+          if png_include not in thirdparty_text:
+              raise SystemExit("ERROR: bundled libpng include anchor not found")
+          thirdparty_text = thirdparty_text.replace(
+              png_include, png_replacement, 1
+          )
+
           gme_include = 'include("cpm-libgme.cmake")'
           gme_replacement = r"""if(APPLE AND "${CMAKE_SYSTEM_NAME}" STREQUAL "iOS")
-              message(STATUS "SRB2 iOS v10: using vcpkg libgme")
+              message(STATUS "SRB2 iOS v11: using vcpkg libgme")
 
               set(SRB2_IOS_VCPKG_PREFIX
                   "${CMAKE_SOURCE_DIR}/../vcpkg/installed/arm64-ios")
@@ -289,9 +343,6 @@ jobs:
                       "${SRB2_IOS_GME_INCLUDE_DIR}"
               )
 
-              # src/CMakeLists.txt also references libgme_SOURCE_DIR when
-              # internal libraries are selected. Point that legacy variable
-              # at the vcpkg include root.
               set(libgme_SOURCE_DIR
                   "${SRB2_IOS_GME_INCLUDE_DIR}"
                   CACHE PATH "" FORCE)
@@ -305,11 +356,14 @@ jobs:
           )
 
           thirdparty_cmake.write_text(thirdparty_text, encoding="utf-8")
-          Path("output/ios-vcpkg-zlib-gme-patch.txt").write_text(
-              zlib_replacement + "\n\n" + gme_replacement + "\n",
+          Path("output/ios-vcpkg-zlib-png-gme-patch.txt").write_text(
+              top_ios_dependencies + "\n\n"
+              + zlib_replacement + "\n\n"
+              + png_replacement + "\n\n"
+              + gme_replacement + "\n",
               encoding="utf-8"
           )
-          print("Patched iOS build to use vcpkg ZLIB and libgme.")
+          print("Patched iOS build to use top-level vcpkg ZLIB/PNG and GLOBAL libgme.")
 
           # curl 7.86 defaults to OpenSSL when CMAKE_SYSTEM_NAME is iOS.
           # iPhoneOS has Apple's Security/SecureTransport instead, so force
@@ -360,9 +414,9 @@ jobs:
 
           ios_patch = r"""
 
-          # ===== SRB2 iOS PORT v10 =====
+          # ===== SRB2 iOS PORT v11 =====
           if(APPLE AND "${CMAKE_SYSTEM_NAME}" STREQUAL "iOS")
-              message(STATUS "Applying SRB2 iOS v10 target patch")
+              message(STATUS "Applying SRB2 iOS v11 target patch")
 
               if(NOT TARGET SRB2SDL2)
                   message(FATAL_ERROR "SRB2SDL2 target was not created by upstream CMake")
@@ -396,10 +450,10 @@ jobs:
                   "-framework QuartzCore"
               )
           endif()
-          # ===== END SRB2 iOS PORT v10 =====
+          # ===== END SRB2 iOS PORT v11 =====
           """
 
-          if "SRB2 iOS PORT v10" not in s:
+          if "SRB2 iOS PORT v11" not in s:
               s = s.rstrip() + "\n" + ios_patch + "\n"
 
           top.write_text(s, encoding="utf-8")
@@ -417,8 +471,8 @@ jobs:
           tail -80 SRB2/CMakeLists.txt
           echo "===== IOS BUNDLE INSTALL PATCH ====="
           sed -n '72,96p' SRB2/src/sdl/CMakeLists.txt
-          echo "===== IOS ZLIB/LIBGME PATCH ====="
-          cat output/ios-vcpkg-zlib-gme-patch.txt
+          echo "===== IOS ZLIB/PNG/LIBGME PATCH ====="
+          cat output/ios-vcpkg-zlib-png-gme-patch.txt
           echo "===== CURL IOS PATCH ====="
           sed -n '1,90p' SRB2/thirdparty/cpm-curl.cmake
           echo "===== BOOTSTRAP ====="
@@ -444,7 +498,6 @@ jobs:
             -DCURL_USE_OPENSSL=OFF \
             -DCURL_USE_SECTRANSP=ON \
             -DSRB2_CONFIG_HWRENDER=OFF \
-            -DSRB2_CONFIG_EXECINFO=OFF \
             -DSRB2_CONFIG_ERRORMODE=OFF \
             -DSRB2_SDL2_EXE_NAME=SRB2 \
             -DCMAKE_BUILD_TYPE=Release \
@@ -555,8 +608,8 @@ jobs:
           rm -rf Payload
           mkdir Payload
           cp -a stage/SRB2.app Payload/
-          zip -qry Sonic-Robo-Blast-2-iOS-v10-UNSIGNED.ipa Payload
-          ls -lh Sonic-Robo-Blast-2-iOS-v10-UNSIGNED.ipa
+          zip -qry Sonic-Robo-Blast-2-iOS-v11-UNSIGNED.ipa Payload
+          ls -lh Sonic-Robo-Blast-2-iOS-v11-UNSIGNED.ipa
 
       - name: Save build logs
         if: always()
@@ -565,7 +618,7 @@ jobs:
           set +e
           mkdir -p output
           {
-            echo "SRB2 iOS v10"
+            echo "SRB2 iOS v11"
             echo "CONFIGURE=${{ steps.configure.outcome }}"
             echo "BUILD=${{ steps.build.outcome }}"
             echo "APP=${{ steps.app.outcome }}"
@@ -583,8 +636,8 @@ jobs:
         if: steps.ipa.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
-          name: Sonic-Robo-Blast-2-iOS-v10-UNSIGNED
-          path: Sonic-Robo-Blast-2-iOS-v10-UNSIGNED.ipa
+          name: Sonic-Robo-Blast-2-iOS-v11-UNSIGNED
+          path: Sonic-Robo-Blast-2-iOS-v11-UNSIGNED.ipa
           if-no-files-found: error
           retention-days: 7
           compression-level: 0
@@ -593,7 +646,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: Sonic-Robo-Blast-2-iOS-v10-Logs
+          name: Sonic-Robo-Blast-2-iOS-v11-Logs
           path: output
           if-no-files-found: ignore
           retention-days: 7
@@ -604,9 +657,9 @@ jobs:
         shell: bash
         run: |
           if [ "${{ steps.ipa.outcome }}" = "success" ]; then
-            echo "SUCCESS: Sonic Robo Blast 2 iOS v10 IPA created."
+            echo "SUCCESS: Sonic Robo Blast 2 iOS v11 IPA created."
           else
             echo "The build stopped before the IPA was created."
             echo "The FIRST red step above is now the real error."
-            echo "Sonic-Robo-Blast-2-iOS-v10-Logs was uploaded for diagnostics."
+            echo "Sonic-Robo-Blast-2-iOS-v11-Logs was uploaded for diagnostics."
           fi
