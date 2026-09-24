@@ -1,4 +1,4 @@
-name: Sonic Robo Blast 2 iOS Port v12
+name: Sonic Robo Blast 2 iOS Port v13
 
 on:
   workflow_dispatch:
@@ -8,7 +8,7 @@ permissions:
 
 jobs:
   build-ios:
-    name: Build Sonic Robo Blast 2 iOS IPA v12
+    name: Build Sonic Robo Blast 2 iOS IPA v13
     runs-on: macos-latest
     timeout-minutes: 45
 
@@ -511,6 +511,49 @@ jobs:
           echo "===== BOOTSTRAP ====="
           sed -n '1,220p' SRB2/src/sdl/ios_bootstrap.c
 
+      - name: Patch iPhoneOS system compatibility v13
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 <<'PYV13'
+          from pathlib import Path
+
+          p = Path("SRB2/src/sdl/i_system.c")
+          s = p.read_text(encoding="utf-8")
+
+          old = "#include <nlist.h>\\n#include <sys/sysctl.h>"
+          new = "#ifndef SRB2_IOS_PORT\\n#include <nlist.h>\\n#include <sys/sysctl.h>\\n#endif"
+          if old not in s:
+              raise SystemExit("ERROR: nlist/sysctl anchor not found")
+          s = s.replace(old, new, 1)
+
+          old = '#ifdef __APPLE__\\n#include "macosx/mac_resources.h"\\n#endif'
+          new = '#if defined(__APPLE__) && !defined(SRB2_IOS_PORT)\\n#include "macosx/mac_resources.h"\\n#endif'
+          if old not in s:
+              raise SystemExit("ERROR: mac_resources anchor not found")
+          s = s.replace(old, new, 1)
+
+          old = "#if defined (__unix__) || defined(__APPLE__) || defined (UNIXCOMMON)\\n#include <execinfo.h>\\n#include <time.h>\\n#define UNIXBACKTRACE\\n#endif"
+          new = "#if defined (__unix__) || defined(__APPLE__) || defined (UNIXCOMMON)\\n#include <time.h>\\n#if !defined(SRB2_IOS_PORT)\\n#include <execinfo.h>\\n#define UNIXBACKTRACE\\n#endif\\n#endif"
+          if old not in s:
+              raise SystemExit("ERROR: execinfo anchor not found")
+          s = s.replace(old, new, 1)
+
+          old = "#ifdef __APPLE__\\n\\tOSX_GetResourcesPath(returnWadPath);\\n\\tCHECKWADPATH(returnWadPath);\\n#endif"
+          new = "#if defined(__APPLE__) && !defined(SRB2_IOS_PORT)\\n\\tOSX_GetResourcesPath(returnWadPath);\\n\\tCHECKWADPATH(returnWadPath);\\n#endif"
+          if old not in s:
+              raise SystemExit("ERROR: OSX_GetResourcesPath anchor not found")
+          s = s.replace(old, new, 1)
+
+          p.write_text(s, encoding="utf-8")
+          print("SRB2 v13 iPhoneOS system patch applied")
+          PYV13
+
+          echo "===== VERIFY V13 IOS SYSTEM PATCH ====="
+          grep -n -E 'nlist|sysctl|execinfo|OSX_GetResourcesPath|SRB2_IOS_PORT' \
+            SRB2/src/sdl/i_system.c || true
+
       - name: Configure iPhone arm64 build
         id: configure
         shell: bash
@@ -644,8 +687,8 @@ jobs:
           rm -rf Payload
           mkdir Payload
           cp -a stage/SRB2.app Payload/
-          zip -qry Sonic-Robo-Blast-2-iOS-v12-UNSIGNED.ipa Payload
-          ls -lh Sonic-Robo-Blast-2-iOS-v12-UNSIGNED.ipa
+          zip -qry Sonic-Robo-Blast-2-iOS-v13-UNSIGNED.ipa Payload
+          ls -lh Sonic-Robo-Blast-2-iOS-v13-UNSIGNED.ipa
 
       - name: Save build logs
         if: always()
@@ -654,7 +697,7 @@ jobs:
           set +e
           mkdir -p output
           {
-            echo "SRB2 iOS v12"
+            echo "SRB2 iOS v13"
             echo "CONFIGURE=${{ steps.configure.outcome }}"
             echo "BUILD=${{ steps.build.outcome }}"
             echo "APP=${{ steps.app.outcome }}"
@@ -672,8 +715,8 @@ jobs:
         if: steps.ipa.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
-          name: Sonic-Robo-Blast-2-iOS-v12-UNSIGNED
-          path: Sonic-Robo-Blast-2-iOS-v12-UNSIGNED.ipa
+          name: Sonic-Robo-Blast-2-iOS-v13-UNSIGNED
+          path: Sonic-Robo-Blast-2-iOS-v13-UNSIGNED.ipa
           if-no-files-found: error
           retention-days: 7
           compression-level: 0
@@ -682,7 +725,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: Sonic-Robo-Blast-2-iOS-v12-Logs
+          name: Sonic-Robo-Blast-2-iOS-v13-Logs
           path: output
           if-no-files-found: ignore
           retention-days: 7
@@ -693,9 +736,9 @@ jobs:
         shell: bash
         run: |
           if [ "${{ steps.ipa.outcome }}" = "success" ]; then
-            echo "SUCCESS: Sonic Robo Blast 2 iOS v12 IPA created."
+            echo "SUCCESS: Sonic Robo Blast 2 iOS v13 IPA created."
           else
             echo "The build stopped before the IPA was created."
             echo "The FIRST red step above is now the real error."
-            echo "Sonic-Robo-Blast-2-iOS-v12-Logs was uploaded for diagnostics."
+            echo "Sonic-Robo-Blast-2-iOS-v13-Logs was uploaded for diagnostics."
           fi
